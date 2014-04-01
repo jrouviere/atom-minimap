@@ -30,6 +30,7 @@ class MinimapView extends View
     @minimapScale = @scale(@scaleX, @scaleY)
     @miniScrollView = @miniEditorView.scrollView
     @minimapScroll = 0
+    @inited = false
 
   initialize: ->
     @on 'mousewheel', @mouseWheel
@@ -142,6 +143,16 @@ class MinimapView extends View
       @transform @miniWrapper[0], @minimapScale
 
     @transform @miniOverlayer[0], @translateY(overlayY)
+
+    unless @inited
+      @inited = true
+      @css
+        '-webkit-transform': 'translate3d(0, 0, 0)',
+                  transform: 'translate3d(0, 0, 0)'
+      @addClass 'animated fadeIn'
+      @one 'webkitAnimationEnd AnimationEnd', =>
+        @removeClass 'animated fadeIn'
+        @miniWrapper.addClass 'transition'
 
   # EVENT CALLBACKS
 

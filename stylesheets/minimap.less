@@ -3,6 +3,8 @@
 // See https://github.com/atom/atom-dark-ui/blob/master/stylesheets/ui-variables.less
 // for a full listing of what's available.
 @import "ui-variables";
+// @import (css) "animate.css"; // failed!
+@import "animate.css.less";
 
 @font-face {
   font-family: 'Redacted';
@@ -29,6 +31,8 @@
   overflow: hidden;
   box-sizing: border-box;
   .accelerated;
+  -webkit-transform: translate3d(100%, 0, 0);
+          transform: translate3d(100%, 0, 0);
 
   .line {
     opacity: .6;
@@ -46,6 +50,7 @@
     background-color: #888;
     opacity: .2;
     .accelerated;
+    .transition;
   }
 
   .minimap-editor {
@@ -71,5 +76,10 @@
             backface-visibility: hidden;
     -webkit-transform: translateZ(0);
             transform: translateZ(0);
+  }
+
+  .transition {
+    -webkit-transition: all 144ms ease;
+            transition: all 144ms ease;
   }
 }
