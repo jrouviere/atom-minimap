@@ -63,6 +63,10 @@ The minimap can be augmented with plugins, belows the list of available plugins 
   * [Color Highlight](https://atom.io/packages/minimap-color-highlight)
   * [Highlight Selected](https://atom.io/packages/minimap-highlight-selected)
 
+### Wiki
+
+* [How to create a minimap plugin?](https://github.com/fundon/atom-minimap/wiki/Plugin)
+
 ### Roadmap
 
 * Smooth animation
