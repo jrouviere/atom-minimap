@@ -1,6 +1,9 @@
 {EditorView, ScrollView, $} = require 'atom'
 {Emitter} = require 'emissary'
 Debug = require 'prolix'
+{toArray} = require 'underscore-plus'
+
+WrapperDiv = document.createElement('div')
 
 module.exports =
 class MinimapEditorView extends ScrollView
@@ -13,12 +16,15 @@ class MinimapEditorView extends ScrollView
         @div class: 'lines', outlet: 'lines'
 
   frameRequested: false
-  dummyNode: document.createElement('div')
 
   constructor: ->
     super
     @pendingChanges = []
-    @lineClasses = {}
+    @lineDecorations = {}
+    @lineNodesByLineId = {}
+    @screenRowsByLineId = {}
+    @lineIdsByScreenRow = {}
+    @renderedDecorationsByLineId = {}
 
   initialize: ->
     @lineOverdraw = atom.config.get('minimap.lineOverdraw')
@@ -54,7 +60,7 @@ class MinimapEditorView extends ScrollView
     return if @frameRequested
     @frameRequested = true
 
-    setImmediate =>
+    webkitRequestAnimationFrame =>
       @startBench()
       @update()
       @endBench('minimpap update')
@@ -68,28 +74,21 @@ class MinimapEditorView extends ScrollView
     @requestUpdate()
 
   addLineClass: (line, cls) ->
-    @lineClasses[line] ||= []
-    @lineClasses[line].push cls
-
-    if @firstRenderedScreenRow? and line >= @firstRenderedScreenRow and line <= @lastRenderedScreenRow
-      index = line - @firstRenderedScreenRow - 1
-      @lines.children()[index]?.classList.add(cls)
+    @lineDecorations[line] ||= []
+    @lineDecorations[line].push cls
+    @requestUpdate()
 
   removeLineClass: (line, cls) ->
-    if @lineClasses[line] and (index = @lineClasses[line].indexOf cls) isnt -1
-      @lineClasses[line].splice(index, 1)
-
-    if @firstRenderedScreenRow? and line >= @firstRenderedScreenRow and line <= @lastRenderedScreenRow
-      index = line - @firstRenderedScreenRow - 1
-      @lines.children()[index]?.classList.remove(cls)
+    if @lineDecorations[line] and (index = @lineDecorations[line].indexOf cls) isnt -1
+      @lineDecorations[line].splice(index, 1)
+    @requestUpdate()
 
   removeAllLineClasses: (classesToRemove...) ->
-    for k,classes of @lineClasses
-      for cls in classes
-        if classesToRemove.length is 0 or cls in classesToRemove
-          @find(".#{cls}").removeClass(cls)
-
-    @lineClasses = {}
+    if classesToRemove.length
+      @removeLineClass(cls) for cls in classesToRemove
+    else
+      @lineDecorations = {}
+      @requestUpdate()
 
   registerBufferChanges: (event) =>
     @pendingChanges.push event
@@ -127,180 +126,108 @@ class MinimapEditorView extends ScrollView
       renderFrom = Math.min(lastScreenRow, Math.max(0, firstVisibleScreenRow - @lineOverdraw))
       renderTo = Math.min(lastScreenRow, lastScreenRowToRender + @lineOverdraw)
 
-    has_no_changes = @pendingChanges.length == 0 and @firstRenderedScreenRow and @firstRenderedScreenRow <= renderFrom and renderTo <= @lastRenderedScreenRow
+    has_no_changes = @pendingChanges.length == 0 and @firstRenderedScreenRow? and @firstRenderedScreenRow <= renderFrom and renderTo <= @lastRenderedScreenRow
     return if has_no_changes
 
-    changes = @pendingChanges
-    intactRanges = @computeIntactRanges(renderFrom, renderTo)
-
-    @clearDirtyRanges(intactRanges)
-    @fillDirtyRanges(intactRanges, renderFrom, renderTo)
+    @clearScreenRowCaches() if @pendingChanges.length
+    renderedRowRange = [renderFrom, renderTo]
+    @updateLines(renderedRowRange)
     @firstRenderedScreenRow = renderFrom
     @lastRenderedScreenRow = renderTo
-    @updatePaddingOfRenderedLines()
+
+    @lines.height(@getMinimapHeight())
+    @pendingChanges = []
     @emit 'minimap:updated'
 
-  computeIntactRanges: (renderFrom, renderTo) ->
-    return [] if !@firstRenderedScreenRow? and !@lastRenderedScreenRow?
+  clearScreenRowCaches: ->
+    @screenRowsByLineId = {}
+    @lineIdsByScreenRow = {}
 
-    intactRanges = [{start: @firstRenderedScreenRow, end: @lastRenderedScreenRow, domStart: 0}]
+  updateLines: (renderedRowRange) ->
+    [startRow, endRow] = renderedRowRange
 
-    if @editorView.showIndentGuide
-      emptyLineChanges = []
-      for change in @pendingChanges
-        changes = @computeSurroundingEmptyLineChanges(change)
-        emptyLineChanges.push(changes...)
+    visibleLines = @editor.linesForScreenRows(startRow, endRow - 1)
+    @removeLineNodes(visibleLines)
+    @appendOrUpdateVisibleLineNodes(visibleLines, startRow)
 
-      @pendingChanges.push(emptyLineChanges...)
+  removeLineNodes: (visibleLines=[]) ->
+    visibleLineIds = new Set
+    visibleLineIds.add(line.id.toString()) for line in visibleLines
+    node = @lines[0]
 
-    for change in @pendingChanges
-      newIntactRanges = []
-      for range in intactRanges
-        if change.end < range.start and change.screenDelta != 0
-          newIntactRanges.push(
-            start: range.start + change.screenDelta
-            end: range.end + change.screenDelta
-            domStart: range.domStart
-          )
-        else if change.end < range.start or change.start > range.end
-          newIntactRanges.push(range)
-        else
-          if change.start > range.start
-            newIntactRanges.push(
-              start: range.start
-              end: change.start - 1
-              domStart: range.domStart)
-          if change.end < range.end
-            newIntactRanges.push(
-              start: change.end + change.screenDelta + 1
-              end: range.end + change.screenDelta
-              domStart: range.domStart + change.end + 1 - range.start
-            )
+    for lineId, lineNode of @lineNodesByLineId when not visibleLineIds.has(lineId)
+      screenRow = @screenRowsByLineId[lineId]
+      if not screenRow?
+        delete @lineNodesByLineId[lineId]
+        delete @lineIdsByScreenRow[screenRow] if @lineIdsByScreenRow[screenRow] is lineId
+        delete @screenRowsByLineId[lineId]
+        delete @renderedDecorationsByLineId[lineId]
+        node.removeChild(lineNode)
 
-      intactRanges = newIntactRanges
+  appendOrUpdateVisibleLineNodes: (visibleLines, startRow, updateWidth) ->
+    linesComponent = @editorView.component.refs.lines
+    linesComponent.props.lineDecorations ||= {}
 
-    @truncateIntactRanges(intactRanges, renderFrom, renderTo)
+    newLines = null
+    newLinesHTML = null
 
-    @pendingChanges = []
+    for line, index in visibleLines
+      screenRow = startRow + index
 
-    intactRanges
-
-  truncateIntactRanges: (intactRanges, renderFrom, renderTo) ->
-    i = 0
-    while i < intactRanges.length
-      range = intactRanges[i]
-      if range.start < renderFrom
-        range.domStart += renderFrom - range.start
-        range.start = renderFrom
-      if range.end > renderTo
-        range.end = renderTo
-      if range.start >= range.end
-        intactRanges.splice(i--, 1)
-      i++
-    intactRanges.sort (a, b) -> a.domStart - b.domStart
-
-  computeSurroundingEmptyLineChanges: (change) ->
-    emptyLineChanges = []
-
-    if change.bufferDelta?
-      afterStart = change.end + change.bufferDelta + 1
-      if @editor.lineForBufferRow(afterStart) is ''
-        afterEnd = afterStart
-        afterEnd++ while @editor.lineForBufferRow(afterEnd + 1) is ''
-        emptyLineChanges.push({start: afterStart, end: afterEnd, screenDelta: 0})
-
-      beforeEnd = change.start - 1
-      if @editor.lineForBufferRow(beforeEnd) is ''
-        beforeStart = beforeEnd
-        beforeStart-- while @editor.lineForBufferRow(beforeStart - 1) is ''
-        emptyLineChanges.push({start: beforeStart, end: beforeEnd, screenDelta: 0})
-
-    emptyLineChanges
-
-  clearDirtyRanges: (intactRanges) ->
-    if intactRanges.length == 0
-      @lines[0].innerHTML = ''
-    else if currentLine = @lines[0].firstChild
-      unless currentLine?
-        console.warn "Unexpected undefined first line in clearing dirty ranges"
-        return
-
-      domPosition = 0
-      for intactRange in intactRanges
-        while intactRange.domStart > domPosition
-          unless currentLine?
-            console.warn "Unexpected undefined line at dom position #{domPosition} with range starting at position #{intactRange.domStart} (#{intactRange.start}..#{intactRange.end})"
-            return
-          currentLine = @clearLine(currentLine)
-          domPosition++
-
-        for i in [intactRange.start..intactRange.end]
-          unless currentLine?
-            console.warn "Unexpected undefined line when clearing dirty range #{intactRange.start}..#{intactRange.end}"
-            return
-          currentLine = currentLine.nextSibling
-          domPosition++
-
-      while currentLine
-        currentLine = @clearLine(currentLine)
-
-  clearLine: (lineElement) ->
-    next = lineElement.nextSibling
-    @lines[0].removeChild(lineElement)
-    next
-
-  fillDirtyRanges: (intactRanges, renderFrom, renderTo) ->
-    i = 0
-    nextIntact = intactRanges[i]
-    currentLine = @lines[0].firstChild
-
-    row = renderFrom
-    while row <= renderTo
-      if row == nextIntact?.end + 1
-        nextIntact = intactRanges[++i]
-
-      if !nextIntact or row < nextIntact.start
-        if nextIntact
-          dirtyRangeEnd = nextIntact.start - 1
-        else
-          dirtyRangeEnd = renderTo
-
-        if @editorView instanceof EditorView
-          for lineElement in @editorView.buildLineElementsForScreenRows(row, dirtyRangeEnd)
-            classes = @lineClasses[row+1]
-            lineElement?.classList.add(classes...) if classes?
-            @lines[0].insertBefore(lineElement, currentLine)
-            row++
-        else
-          linesComponent = @editorView.component.refs.lines
-          lines = @editor.linesForScreenRows(row, dirtyRangeEnd)
-
-          linesComponent.props.lineDecorations ||= {}
-
-          for line,i in lines
-            screenRow = row + i
-            html = linesComponent.buildLineHTML(line, screenRow)
-            @dummyNode.innerHTML = html
-            lineElement = @dummyNode.childNodes[0]
-            unless lineElement?
-              console.warn "Unexpected undefined line element at screen row #{screenRow}"
-              continue
-            classes = @lineClasses[row+1]
-            lineElement.className = 'line'
-            lineElement.classList.add(classes...) if classes?
-            lineElement.style.cssText=""
-            @lines[0].insertBefore(lineElement, currentLine)
-            row++
+      if @hasLineNode(line.id)
+        @updateLineNode(line, screenRow, updateWidth)
       else
-        currentLine = currentLine?.nextSibling
-        row++
+        newLines ?= []
+        newLinesHTML ?= ""
+        newLines.push(line)
+        newLinesHTML += linesComponent.buildLineHTML(line, screenRow)
+        @screenRowsByLineId[line.id] = screenRow
+        @lineIdsByScreenRow[screenRow] = line.id
 
-  updatePaddingOfRenderedLines: ->
-    paddingTop = @firstRenderedScreenRow * @lineHeight
-    @lines.css('padding-top', paddingTop)
+      @renderedDecorationsByLineId[line.id] = @lineDecorations[screenRow]
 
-    paddingBottom = (@editor.getLastScreenRow() - @lastRenderedScreenRow) * @lineHeight
-    @lines.css('padding-bottom', paddingBottom)
+    return unless newLines?
+
+    WrapperDiv.innerHTML = newLinesHTML
+    newLineNodes = toArray(WrapperDiv.children)
+    node = @lines[0]
+    for line, i in newLines
+      lineNode = newLineNodes[i]
+      classes = @lineDecorations[line.id]
+      lineNode.className = 'line'
+      lineNode.classList.add(classes...) if classes?
+      @lineNodesByLineId[line.id] = lineNode
+      node.appendChild(lineNode)
+
+  updateLineNode: (line, screenRow, updateWidth) ->
+    lineHeightInPixels = @getLineHeight()
+
+    lineNode = @lineNodesByLineId[line.id]
+
+    decorations = @lineDecorations[screenRow]
+    previousDecorations = @renderedDecorationsByLineId[line.id]
+
+    if previousDecorations?
+      for decoration in previousDecorations
+        unless @hasDecoration(decorations, decoration)
+          lineNode.classList.remove(decoration)
+
+    if decorations?
+      for decoration in decorations
+        unless @hasDecoration(previousDecorations, decoration)
+          lineNode.classList.add(decoration)
+
+    unless @screenRowsByLineId[line.id] is screenRow
+      lineNode.style.top = screenRow * lineHeightInPixels + 'px'
+      lineNode.dataset.screenRow = screenRow
+      @screenRowsByLineId[line.id] = screenRow
+      @lineIdsByScreenRow[screenRow] = line.id
+
+  hasLineNode: (lineId) ->
+    @lineNodesByLineId.hasOwnProperty(lineId)
+
+  hasDecoration: (decorations, decoration) ->
+    decorations? and decorations.indexOf(decoration) isnt -1
 
   getClientRect: ->
     sv = @scrollView[0]
