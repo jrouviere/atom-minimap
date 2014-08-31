@@ -91,6 +91,7 @@ class MinimapEditorView extends ScrollView
     @cachedScrollTop = scrollTop
     @update()
 
+
   getMinimapHeight: -> @getLinesCount() * @getLineHeight()
   getLineHeight: -> 3
   getCharHeight: -> 2
@@ -151,8 +152,10 @@ class MinimapEditorView extends ScrollView
       @tokenColorCache[flatScopes] = color
     @tokenColorCache[flatScopes]
 
-  drawLines: (firstRow, lastRow, offsetRow, context) ->
+  drawLines: (context, firstRow, lastRow, offsetRow) ->
     lines = @editor.linesForScreenRows(firstRow, lastRow)
+
+    console.log "Drawing from #{firstRow} to #{lastRow} @ #{offsetRow}: #{lines.length} lines"
     lineHeight = @getLineHeight()
     charHeight = @getCharHeight()
     charWidth = @getCharWidth()
@@ -188,6 +191,15 @@ class MinimapEditorView extends ScrollView
           x += w * charWidth
     context.fill()
 
+  copyBitmapPart: (context, bitmapCanvas, srcRow, destRow, rowCount) ->
+    lineHeight = @getLineHeight()
+    context.drawImage(bitmapCanvas,
+        0, srcRow * lineHeight,
+        bitmapCanvas.width, rowCount * lineHeight,
+        0, destRow * lineHeight,
+        bitmapCanvas.width, rowCount * lineHeight)
+    console.log "Copying from #{srcRow} X #{rowCount} @ #{destRow}"
+
   update: =>
     return unless @editorView?
     return unless @displayBuffer.tokenizedBuffer.fullyTokenized
@@ -196,22 +208,72 @@ class MinimapEditorView extends ScrollView
     @lineCanvas[0].width = @lineCanvas[0].offsetWidth
     @lineCanvas[0].height = @lineCanvas[0].offsetHeight
 
+    lineHeight = @getLineHeight()
+
     firstRow = @getFirstVisibleScreenRow()
     lastRow = @getLastVisibleScreenRow()
 
-    # TODO: for now we don't handle screen changes, simply ask for a full redraw
-    if @pendingChanges.length > 0
-      @offscreenFirstRow = null
-      @pendingChanges = []
+    console.log "firstRow: #{firstRow}, lastRow: #{lastRow}"
+    console.log "offscreenFirstRow: #{@offscreenFirstRow}, offscreenLastRow: #{@offscreenLastRow}"
 
-    if @offscreenFirstRow?
-      @context.drawImage(@offscreenCanvas, 0, (@offscreenFirstRow-firstRow) * @getLineHeight())
-      if firstRow < @offscreenFirstRow
-        @drawLines(firstRow, @offscreenFirstRow, 0, @context)
-      if lastRow > @offscreenLastRow
-        @drawLines(@offscreenLastRow, lastRow, @offscreenLastRow-firstRow, @context)
+    # TODO: for now we don't handle screen changes, simply ask for a full redraw
+    if @offscreenFirstRow? and @pendingChanges.length > 0
+      console.log "Changes"
+      for change in @pendingChanges
+        console.log change
+        {start, end, screenDelta} = change
+
+        #reset canvas virtual width/height
+        @lineCanvas[0].width = @lineCanvas[0].offsetWidth
+        @lineCanvas[0].height = @lineCanvas[0].offsetHeight
+
+        if firstRow < @offscreenFirstRow
+          @drawLines(@context, firstRow, @offscreenFirstRow, 0)
+
+        @copyBitmapPart(@context, @offscreenCanvas,
+          0,
+          @offscreenFirstRow-firstRow,
+          start-@offscreenFirstRow)
+
+        middleEnd = end+screenDelta
+
+        if middleEnd >= start
+          @drawLines(@context, start, middleEnd, start-firstRow)
+
+        p2From = end-@offscreenFirstRow+1
+        p2To = end-firstRow+1+screenDelta
+
+        if p2From < p2To
+          @copyBitmapPart(@context, @offscreenCanvas,
+            p2From, p2To,
+            @offscreenLastRow-p2From)
+
+        if lastRow > @offscreenLastRow-p2From+p2To
+          @drawLines(@context, @offscreenLastRow-p2From+p2To, lastRow, @offscreenLastRow-p2From+p2To-firstRow)
+
+        # copy displayed canvas to offscreen canvas
+        @offscreenCanvas.width = @lineCanvas[0].width
+        @offscreenCanvas.height = @lineCanvas[0].height
+        @offscreenCtxt.drawImage(@lineCanvas[0], 0, 0)
+        @offscreenFirstRow = firstRow
+        @offscreenLastRow = lastRow
+
+      @pendingChanges = []
     else
-      @drawLines(firstRow, lastRow, 0, @context)
+      console.log "No changes"
+      if @offscreenFirstRow?
+        @copyBitmapPart(@context, @offscreenCanvas,
+          0,
+          @offscreenFirstRow-firstRow,
+          @offscreenLastRow-@offscreenFirstRow)
+        if firstRow < @offscreenFirstRow
+          @drawLines(@context, firstRow, @offscreenFirstRow-1, 0)
+        if lastRow > @offscreenLastRow
+          @drawLines(@context, @offscreenLastRow+1, lastRow, @offscreenLastRow-firstRow)
+      else
+        @pendingChanges = [] #flush old changes
+        @drawLines(@context, firstRow, lastRow, 0)
+
 
     # copy displayed canvas to offscreen canvas
     @offscreenCanvas.width = @lineCanvas[0].width
